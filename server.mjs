@@ -13,8 +13,12 @@ const distPath = path.join(__dirname, 'dist');
 app.use(compression());
 app.use(express.static(distPath, { extensions: ['html'] }));
 
-// SPA fallback to index.html
-app.get('*', (_req, res) => {
+/**
+ * SPA fallback to index.html
+ * Express 5 uses path-to-regexp v6 which no longer supports '*' as a path string.
+ * Use a RegExp catch-all instead to avoid "Missing parameter name" errors.
+ */
+app.get(/.*/, (_req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
 });
 
