@@ -1,246 +1,295 @@
 # VESTAL — Visual Efficiency & Speed Training at Lightspeed
 
-Vestal is a fast‑reading web app built with React 19 + Vite 6 + TypeScript and served in production by an Express server on Heroku. It supports:
+Vestal is a fast‑reading web app built with React + Vite + TypeScript and served in production by an Express server on Heroku. It supports:
 - Pasting arbitrary text, or fetching an article from Wikipedia (multilingual)
 - Adjustable reading parameters: WPM (words per minute), chunk size, and font size
 - A setup view for input and configuration, and a reading view for timed display with fine‑grained controls
 
-Deployed app (Heroku, EU region, Eco dyno):
+Deployed app (Heroku, EU region, Eco dyno)
 - https://vestal-5098d2e3b384.herokuapp.com/
 
-Repository (clean provenance — no AI Studio template):
+Repository (clean provenance — no AI Studio template)
 - https://github.com/mcainshcameron/vestal-app
 
 Note: The previous “generated from Google Gemini AI Studio template” provenance was removed by migrating the code to a brand‑new repository with no template origin. The codebase itself has been cleaned of AI Studio artifacts.
 
 ---
 
-## High‑Level Architecture
+## High‑Level Architecture (Conceptual)
 
-- Client: React 19 + TypeScript built with Vite 6
-  - `index.html` includes Tailwind via CDN
-  - `index.tsx` bootstraps React and mounts `<App />`
-  - `App.tsx` orchestrates state and toggles between Setup and Reading views
-  - `components/SetupView.tsx`: input area, Wikipedia search, parameter sliders, Start button
-  - `components/ReadingView.tsx`: chunked timed rendering loop with controls
-- Build: Vite (ESM, TS), output to `dist/`
-- Server: `server.mjs` (Express 5 + compression) serves static files from `dist/` and falls back to SPA `index.html`
-- Deployment: Heroku (stack heroku-24), single web dyno on the Eco plan, Node engines pinned (>=20.19 <21)
+- Client (React + TypeScript, built with Vite)
+  - index.html includes Tailwind via CDN for styling
+  - index.tsx mounts the root React component
+  - App.tsx holds the main state and switches between Setup and Reading views
+  - SetupView: input, language selection, Wikipedia search, parameter sliders, Start button
+  - ReadingView: chunk calculation, timing loop, controls (play/pause/stop), responsive font sizing
+- Build: Vite compiles/optimizes to static files in dist/
+- Server: Express serves dist/ and falls back to index.html for client‑side routing
+- Deployment: Heroku (stack heroku‑24), single Eco web dyno, Node engines pinned (>=20.19 <21)
 
-Directory (key files under `Vestal/`):
-- `index.html`
-- `index.tsx`
-- `App.tsx`
-- `components/SetupView.tsx`
-- `components/ReadingView.tsx`
-- `components/icons.tsx`
-- `vite.config.ts`
-- `server.mjs`
-- `tsconfig.json`
-- `package.json`
-- `Procfile`
+Directory (key files under Vestal/)
+- App.tsx, index.tsx, index.html
+- components/SetupView.tsx, components/ReadingView.tsx, components/icons.tsx
+- vite.config.ts, server.mjs, tsconfig.json, package.json, Procfile
 
 ---
 
-## Data Flow and Components
+## End‑to‑End Data Flow
 
-### App State and Views (`App.tsx`)
-- App‑level state:
-  - `text: string` — full text to be rendered
-  - `wpm: number` — words per minute
-  - `chunkSize: number` — number of words per rendered chunk
-  - `fontSize: number` — base font size for rendering
-  - `view: AppView` — enum, either `SETUP` or `READING`
-  - `isLoading: boolean`, `searchError: string | null` — for Wikipedia search UX
-  - `language: string` — Wikipedia language code (e.g. `en`, `it`, `ru`)
-- Transitions:
-  - Setup → Reading via `handleStartReading()` (with `text.trim()` guard)
-  - Reading → Setup via `handleStopReading()`
+1) User provides content
+   - Option A: Paste text into a textarea in the Setup view
+   - Option B: Use Wikipedia search (choose language, type query, press Enter or click Search)
+   - When text is present, clicking Start switches the app to the Reading view
 
-### Wikipedia Fetch (multilingual)
-The app constructs a Wikipedia REST query to fetch the top search result’s extract in the selected language and loads it into `text`.
+2) Reading workflow
+   - Text is split into words and grouped into chunks of configurable size
+   - A timing loop advances through chunks based on WPM and punctuation‑aware pauses
+   - Controls allow adjusting WPM, chunk size, font size, and scrubbing position
+   - Stop returns to the Setup view without losing configuration
 
-Core logic (from `App.tsx`):
-```ts
-const handleWikipediaSearch = async (query: string, lang: string) => {
-  if (!query.trim()) return;
+3) Build and Serve
+   - Vite builds the app into dist/
+   - Express serves dist/ as static assets and responds with index.html for any route (SPA)
 
-  setIsLoading(true);
-  setSearchError(null);
-
-  const endpoint =
-    `https://${lang}.wikipedia.org/w/api.php?action=query&format=json&prop=extracts&exlimit=1&explaintext=1&generator=search` +
-    `&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&origin=*`;
-
-  try {
-    const response = await fetch(endpoint);
-    if (!response.ok) throw new Error('Network response was not ok.');
-    const data = await response.json();
-    const pages = data.query?.pages;
-    if (pages) {
-      const pageId = Object.keys(pages)[0];
-      if (pageId === '-1') throw new Error(`Article not found for "${query}".`);
-      const page = pages[pageId];
-      const extract = page.extract;
-      if (extract) setText(extract);
-      else throw new Error('Could not extract text from the article.');
-    } else {
-      throw new Error('No articles found.');
-    }
-  } catch (err) {
-    setSearchError(err instanceof Error ? err.message : 'An unknown error occurred.');
-  } finally {
-    setIsLoading(false);
-  }
-};
-```
-
-Notes:
-- `origin=*` is required for CORS in browser.
-- Languages are user‑selectable; endpoint host changes by `lang` (e.g. `en.wikipedia.org`, `it.wikipedia.org`).
-- The extract is plain text (`explaintext=1`), which is ideal for speed reading.
-
-### Setup View (`components/SetupView.tsx`)
-- UI elements:
-  - Wikipedia search input + language selector + “Search” button. Enter key triggers search.
-  - Textarea for manual input.
-  - Sliders for `wpm` (50–1500), `chunkSize` (1–7), and `fontSize` (24–144).
-  - “Start Reading” button (disabled while loading or with empty text).
-- State managed by parent via props to centralize application logic in `App`.
-
-### Reading View (`components/ReadingView.tsx`)
-- Chunking:
-  - Splits text into chunks of `chunkSize` words:
-    ```ts
-    const words = text.trim().split(/\s+/);
-    for (let i = 0; i < words.length; i += chunkSize) {
-      result.push(words.slice(i, i + chunkSize).join(' '));
-    }
-    ```
-- Timing:
-  - Per chunk, interval is computed as:
-    ```
-    baseInterval = (60,000 ms * wordsInChunk) / wpm
-    + punctuation pause (150ms for comma, 250ms for . ? !)
-    ```
-- Controls:
-  - Play/Pause toggles timed progression.
-  - Stop returns to setup view (user‑driven).
-  - Sliders for WPM, chunk size, font size, and position (scrub current index).
-  - Changing chunk size maintains reading position by mapping the previous word index into the new chunking.
-- Responsive font sizing:
-  - `useLayoutEffect` measures text width and reduces font size if it overflows the container. A 0.95 safety factor is applied with a minimum of 12px.
+4) Deploy
+   - Heroku builds the app (heroku‑postbuild runs Vite build), then runs `web: node server.mjs`
+   - Stack: heroku‑24, Region: EU, Dyno: Eco web (no add‑ons)
 
 ---
 
-## Styling
+## Wikipedia Fetch (Pseudocode)
 
-- Tailwind via CDN in `index.html` for rapid prototyping; no Tailwind build step is required.
-- Minimal custom CSS for `<input type="range">` to provide consistent visual sliders.
+Goal: Fetch the plain‑text extract of the top Wikipedia search result in the selected language.
+
+```
+function fetchWikipedia(query, lang):
+  if query is empty:
+    return
+
+  set isLoading = true
+  clear searchError
+
+  url = "https://{lang}.wikipedia.org/w/api.php" +
+        "?action=query" +
+        "&format=json" +
+        "&prop=extracts" +
+        "&exlimit=1" +
+        "&explaintext=1" +
+        "&generator=search" +
+        "&gsrsearch=" + encode(query) +
+        "&gsrlimit=1" +
+        "&origin=*"
+
+  try:
+    response = HTTP GET url
+    if response not OK:
+      raise "Network error"
+
+    data = parse JSON response
+    pages = data.query.pages (if any)
+
+    if pages exist:
+      firstId = first key in pages
+      if firstId == "-1":
+        raise "Article not found"
+      extract = pages[firstId].extract
+
+      if extract exists:
+        set text = extract
+      else:
+        raise "Could not extract text"
+    else:
+      raise "No articles found"
+
+  catch error:
+    set searchError = error.message or "Unknown error"
+
+  finally:
+    set isLoading = false
+```
+
+Notes
+- origin=* is required for browser CORS
+- Language subdomain changes per selection (en/it/ru, etc.)
+- We fetch plaintext (explaintext=1) for speed‑reading suitability
 
 ---
 
-## Build and Server
+## Reading Logic (Pseudocode)
 
-### Vite Configuration (`vite.config.ts`)
-- React plugin and a simple alias for `@` → project root:
-```ts
-import path from 'path';
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+Chunking and timing:
 
-export default defineConfig({
-  server: { port: 3000, host: '0.0.0.0' },
-  plugins: [react()],
-  resolve: {
-    alias: { '@': path.resolve(__dirname, '.') }
-  }
-});
+```
+function splitIntoChunks(text, chunkSize):
+  words = split text by whitespace
+  chunks = []
+  for i from 0 to length(words) step chunkSize:
+    chunk = join words[i : i+chunkSize] with space
+    if chunk not empty:
+      append chunk to chunks
+  return chunks
+
+function intervalForChunk(chunk, wpm):
+  wordsInChunk = count words in chunk
+  baseIntervalMs = (60000 * wordsInChunk) / wpm
+
+  lastChar = last character of chunk
+  punctuationPause =
+    if lastChar == "," then 150
+    else if lastChar in [".", "?", "!"] then 250
+    else 0
+
+  return baseIntervalMs + punctuationPause
 ```
 
-### Production Server (`server.mjs`)
-- Express 5 + compression serving static `dist/` and SPA fallback to `index.html`.
-- Express 5 uses `path-to-regexp` v6; use a RegExp catch‑all for SPA fallback:
-```js
-app.use(compression());
-app.use(express.static(distPath, { extensions: ['html'] }));
+Playback loop:
 
-// SPA fallback — regex catch-all (Express 5)
-app.get(/.*/, (_req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
 ```
+state:
+  currentIndex = 0
+  isRunning = true
+  chunks = splitIntoChunks(text, chunkSize)
+
+loop:
+  if not isRunning or chunks is empty:
+    wait
+  else:
+    chunk = chunks[currentIndex]
+    wait intervalForChunk(chunk, wpm) milliseconds
+    if currentIndex < last chunk:
+      currentIndex = currentIndex + 1
+    else:
+      isRunning = false  // reached the end
+```
+
+Controls and adjustments:
+
+```
+onTogglePlayPause():
+  if atEnd and not isRunning:
+    currentIndex = 0
+  isRunning = not isRunning
+
+onStop():
+  switch to Setup view (retain state as needed)
+
+onChangeChunkSize(newSize):
+  // Preserve reading position by mapping word index to new chunk index
+  currentWordIndex = currentIndex * oldChunkSize
+  currentIndex = floor(currentWordIndex / newSize)
+  chunkSize = newSize
+
+onChangeFontSize(value):
+  fontSize = value
+
+onChangeWpm(value):
+  wpm = value
+```
+
+Responsive font sizing:
+
+```
+onChunkOrResize():
+  set displayed font size to user value
+  if measured text width > available container width:
+    computed = (containerWidth / textWidth) * userFontSize
+    set displayed font size = max(12, computed * 0.95)  // with a safety factor
+```
+
+---
+
+## Build and Server (Conceptual)
+
+Vite (build):
+
+- Transpiles/bundles React + TypeScript into optimized static assets in dist/
+- Dev server provides fast HMR (local development)
+
+Express (server.mjs):
+
+```
+on start:
+  enable compression
+  serve static files from /dist (serve index.html and assets)
+  for any GET route:
+    respond with /dist/index.html  // SPA fallback (regex catch‑all)
+
+listen on PORT environment variable (provided by Heroku)
+```
+
+Rationale:
+- The regex catch‑all avoids wildcard parsing issues in Express 5’s underlying path‑to‑regexp v6.
 
 ---
 
 ## Local Development
 
 Requirements:
-- Node >=20.19 <21 (pinned in `package.json` engines)
+- Node >= 20.19 and < 21 (enforced via package.json engines)
 - npm
 
-Scripts:
+Commands:
 - Install: `npm install`
-- Dev server: `npm run dev`
-- Build: `npm run build` (outputs to `dist/`)
+- Run dev server: `npm run dev`
+- Build for production: `npm run build` → outputs to dist/
 - Preview (static): `npm run preview`
 
 ---
 
 ## Deployment (Heroku, EU, Eco)
 
-What’s configured in this repo:
-- `Procfile` with `web: node server.mjs`
-- `server.mjs` serves `dist/` with SPA fallback
-- `heroku-postbuild` script runs `npm run build` after dependencies install
-- Node engines pinned (>=20.19 <21) to match Vite plugin requirements
+What this repo provides:
+- Procfile: `web: node server.mjs`
+- heroku‑postbuild script: runs `npm run build` after dependencies are installed
+- Node engines: `>=20.19 <21` (compatible with the Vite React plugin)
+- Express static server with SPA fallback
 
-One‑time setup (already completed for the live app):
-- App created in EU region on stack `heroku-24`
+Completed setup for the live app:
+- App created in EU region on stack heroku‑24
 - Eco dyno enabled (flat $5/month shared across all Eco dynos; no add‑ons)
 - Pipeline created and connected to the new GitHub repo
 
-Two ways to deploy changes:
+Two deployment flows:
 
 1) GitHub Auto‑Deploys (recommended)
-- In the Heroku pipeline dashboard (already connected to `mcainshcameron/vestal-app`):
-  - Enable “Automatic Deploys” from branch `main`.
-  - Each push to `main` triggers a build and release.
+- Pipeline is connected to mcainshcameron/vestal‑app
+- Enable “Automatic Deploys” from branch main in the Heroku Dashboard
+- Every push to main triggers build & release
 
-2) Manual deploy via Heroku remote
-- From the repo directory:
-  - `git push heroku main`
+2) Manual via Heroku remote
+- From the repo: `git push heroku main`
+- Heroku runs the Node buildpack, installs deps, runs postbuild, and starts `web: node server.mjs`
 
-Cost and add‑ons:
-- Running on a single Eco web dyno; no add‑ons attached — confirms flat Eco cost with no extra charges.
-- Verified via CLI: `heroku apps:info -a vestal`, `heroku ps -a vestal`, `heroku addons -a vestal`.
+Cost controls:
+- Single Eco web dyno, no add‑ons → stays at the flat Eco fee
+- Verified via CLI (apps:info, ps, addons)
 
 ---
 
 ## Design Choices and Trade‑offs
 
-- Client‑only Wikipedia fetch keeps the server simple (static serving only).
-- Timing is based on WPM × words per chunk with small punctuation delays for natural pacing.
-- Tailwind via CDN reduces build complexity; can be converted to a compiled Tailwind pipeline if needed.
-- Express 5 routing: using a regex catch‑all avoids `path-to-regexp` v6 wildcard pitfalls.
-- Vite provides modern dev UX and fast production builds.
+- Client‑side Wikipedia fetch: simpler server (static serving only)
+- Timing model: WPM‑based interval per chunk + small punctuation pauses to improve rhythm
+- Tailwind via CDN: avoids extra CSS tooling; can switch to compiled Tailwind if needed
+- Express 5 routing: regex catch‑all ensures SPA fallback compatibility
+- Vite: modern dev/build pipeline with fast local iteration and small deployable assets
 
 ---
 
 ## Roadmap Ideas
 
-- Persist user settings (localStorage)
-- More languages and search hints or autocomplete
-- Advanced parsing to better detect sentence boundaries and more nuanced pauses
-- Keyboard shortcuts for play/pause/seek
-- Service Worker for offline use
-- Optional server‑side proxy for Wikipedia (if stricter CORS policies emerge)
+- Persist user settings (e.g., localStorage)
+- Additional languages and search UX improvements (suggestions/autocomplete)
+- Enhanced pause heuristics based on syntax/semantics
+- Keyboard shortcuts (play/pause/seek)
+- Offline support via Service Worker
+- Optional server‑side proxy for Wikipedia if CORS policies tighten
 
 ---
 
 ## Contributing
 
-Issues and PRs are welcome. Please use conventional commit messages when possible.
+Issues and PRs are welcome. Please use clear commit messages and describe changes precisely.
 
 ---
 
